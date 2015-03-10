@@ -28,6 +28,12 @@ namespace Npgsql
             {
                 xmlReader = CreateXmlReaderForResource("Npgsql.NpgsqlSchema.ssdl");
             }
+#if NET45
+            else if (informationType == StoreSchemaDefinitionVersion3)
+            {
+                xmlReader = CreateXmlReaderForResource("Npgsql.NpgsqlSchemaV3.ssdl");
+            }
+#endif
             else if (informationType == StoreSchemaMapping)
             {
                 xmlReader = CreateXmlReaderForResource("Npgsql.NpgsqlSchema.msl");
@@ -43,6 +49,45 @@ namespace Npgsql
         private const string ScaleFacet = "Scale";
         private const string PrecisionFacet = "Precision";
         private const string FixedLengthFacet = "FixedLength";
+
+        internal static DbType GetDbType(PrimitiveTypeKind _primitiveType)
+        {
+            switch (_primitiveType)
+            {
+                case PrimitiveTypeKind.Binary:
+                    return DbType.Binary;
+                case PrimitiveTypeKind.Boolean:
+                    return DbType.Boolean;
+                case PrimitiveTypeKind.Byte:
+                    return DbType.Byte;
+                case PrimitiveTypeKind.SByte:
+                    return DbType.SByte;
+                case PrimitiveTypeKind.DateTime:
+                    return DbType.DateTime;
+                case PrimitiveTypeKind.DateTimeOffset:
+                    return DbType.DateTimeOffset;
+                case PrimitiveTypeKind.Decimal:
+                    return DbType.Decimal;
+                case PrimitiveTypeKind.Double:
+                    return DbType.Double;
+                case PrimitiveTypeKind.Int16:
+                    return DbType.Int16;
+                case PrimitiveTypeKind.Int32:
+                    return DbType.Int32;
+                case PrimitiveTypeKind.Int64:
+                    return DbType.Int64;
+                case PrimitiveTypeKind.Single:
+                    return DbType.Single;
+                case PrimitiveTypeKind.Time:
+                    return DbType.Time;
+                case PrimitiveTypeKind.Guid:
+                    return DbType.Guid;
+                case PrimitiveTypeKind.String:
+                    return DbType.String;
+                default:
+                    return DbType.Object;
+            }
+        }
 
         public override TypeUsage GetEdmType(TypeUsage storeType)
         {
@@ -149,7 +194,7 @@ namespace Npgsql
                     //TypeUsage.CreateDecimalTypeUsage
                     //TypeUsage.CreateStringTypeUsage
             }
-            throw new NotSupportedException();
+            throw new NotSupportedException("Not supported store type: " + storeTypeName);
         }
 
         public override TypeUsage GetStoreType(TypeUsage edmType)
@@ -200,7 +245,7 @@ namespace Npgsql
                     {
                         // TODO: could get character, character varying, text
                         if (edmType.Facets.TryGetValue(FixedLengthFacet, false, out facet) &&
-                            !facet.IsUnbounded && facet.Value != null)
+                            !facet.IsUnbounded && facet.Value != null && (bool)facet.Value)
                         {
                             PrimitiveType characterPrimitive = StoreTypeNameToStorePrimitiveType["bpchar"];
                             if (edmType.Facets.TryGetValue(MaxLengthFacet, false, out facet) &&
@@ -265,7 +310,7 @@ namespace Npgsql
                     return TypeUsage.CreateDefaultTypeUsage(StoreTypeNameToStorePrimitiveType["int2"]);
             }
 
-            throw new NotSupportedException();
+            throw new NotSupportedException("Not supported edm type: " + edmType);
         }
 
         private static XmlReader CreateXmlReaderForResource(string resourceName)
@@ -273,7 +318,6 @@ namespace Npgsql
             return XmlReader.Create(System.Reflection.Assembly.GetAssembly(typeof(NpgsqlProviderManifest)).GetManifestResourceStream(resourceName));
         }
 
-#if NET40
         public override bool SupportsEscapingLikeArgument(out char escapeCharacter)
         {
             escapeCharacter = '\\';
@@ -282,9 +326,14 @@ namespace Npgsql
 
         public override string EscapeLikeArgument(string argument)
         {
-            return argument.Replace("%", "\\%").Replace("_", "\\_");
+            return argument.Replace("\\","\\\\").Replace("%", "\\%").Replace("_", "\\_");
+        }
+
+#if ENTITIES6
+        public override bool SupportsInExpression()
+        {
+            return true;
         }
 #endif
-
     }
 }

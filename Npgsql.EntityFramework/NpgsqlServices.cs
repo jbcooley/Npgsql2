@@ -16,7 +16,11 @@ using Npgsql.SqlGenerators;
 
 namespace Npgsql
 {
+#if ENTITIES6
+    public class NpgsqlServices : DbProviderServices
+#else
     internal class NpgsqlServices : DbProviderServices
+#endif
     {
         private static readonly NpgsqlServices _instance = new NpgsqlServices();
 
@@ -49,6 +53,7 @@ namespace Npgsql
             {
                 DbParameter dbParameter = command.CreateParameter();
                 dbParameter.ParameterName = parameter.Key;
+                dbParameter.DbType = NpgsqlProviderManifest.GetDbType(((PrimitiveType)parameter.Value.EdmType).PrimitiveTypeKind);
                 command.Parameters.Add(dbParameter);
             }
 
@@ -152,7 +157,7 @@ namespace Npgsql
         {
             var connectionBuilder = new NpgsqlConnectionStringBuilder(connection.ConnectionString)
             {
-                Database = "postgres"
+                Database = "template1"
             };
 
             using (var masterConnection = new NpgsqlConnection(connectionBuilder.ConnectionString))

@@ -30,6 +30,7 @@
 -------------------------------------------------------------------------
 */
 
+#if WHAT_DO_WE_DO_WITH_THIS
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -97,7 +98,7 @@ namespace NpgsqlTypes
             catch (IOException)
             {
                 conn.ClearPool();
-                throw new NpgsqlException("The Connection is broken.");
+                throw;
             }
         }
 
@@ -117,7 +118,7 @@ namespace NpgsqlTypes
                     }
 
                     stream
-                        .WriteBytes((Byte)ASCIIBytes.F)
+                        .WriteByte(ASCIIByteArrays.FunctionCallMessageCode)
                         .WriteInt32(l_msgLen)
                         .WriteInt32(fnid)
                         .WriteInt16(1)
@@ -150,11 +151,11 @@ namespace NpgsqlTypes
                     switch (c)
                     {
                         case 'A': // Asynchronous Notify
-                            Int32 msglen = PGUtil.ReadInt32(stream);
-                            Int32 pid = PGUtil.ReadInt32(stream);
-                            String msg = PGUtil.ReadString(stream);
-                            PGUtil.ReadString(stream);
-                            String param = PGUtil.ReadString(stream);
+                            Int32 msglen = stream.ReadInt32();
+                            Int32 pid = stream.ReadInt32();
+                            String msg = stream.ReadString();
+                            stream.ReadString();
+                            String param = stream.ReadString();
 
                             break;
                             //------------------------------
@@ -166,15 +167,15 @@ namespace NpgsqlTypes
                             //------------------------------
                             // Notice from backend
                         case 'N':
-                            Int32 l_nlen = PGUtil.ReadInt32(stream);
+                            Int32 l_nlen = stream.ReadInt32();
 
                             conn.Connector.FireNotice(new NpgsqlError(stream));
 
                             break;
 
                         case 'V':
-                            Int32 l_msgLen = PGUtil.ReadInt32(stream);
-                            Int32 l_valueLen = PGUtil.ReadInt32(stream);
+                            Int32 l_msgLen = stream.ReadInt32();
+                            Int32 l_valueLen = stream.ReadInt32();
 
                             if (l_valueLen == -1)
                             {
@@ -189,7 +190,7 @@ namespace NpgsqlTypes
                                 // Return an Integer if
                                 if (resulttype)
                                 {
-                                    result = PGUtil.ReadInt32(stream);
+                                    result = stream.ReadInt32();
                                 }
                                 else
                                 {
@@ -213,9 +214,9 @@ namespace NpgsqlTypes
 
                         case 'Z':
                             //TODO: use size better
-                            if (PGUtil.ReadInt32(stream) != 5)
+                            if (stream.ReadInt32() != 5)
                             {
-                                throw new NpgsqlException("Received Z");
+                                throw new Exception("Received Z");
                             }
                             //TODO: handle transaction status
                             Char l_tStatus = (Char) stream.ReadByte();
@@ -223,7 +224,7 @@ namespace NpgsqlTypes
                             break;
 
                         default:
-                            throw new NpgsqlException(string.Format("postgresql.fp.protocol received {0}", c));
+                            throw new Exception(string.Format("postgresql.fp.protocol received {0}", c));
                     }
                 }
 
@@ -327,8 +328,6 @@ namespace NpgsqlTypes
 
         /// <summary>
         /// This returns the function id associated by its name
-        /// If addFunction() or addFunctions() have not been called for this name,
-        /// then an NpgsqlException is thrown.
         /// </summary>
         /// <param name="name">Function name to lookup.</param>
         /// <returns>Function ID for fastpath call.</returns>
@@ -338,3 +337,4 @@ namespace NpgsqlTypes
         }
     }
 }
+#endif

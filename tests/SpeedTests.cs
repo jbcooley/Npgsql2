@@ -5,6 +5,9 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.IO;
+using Common.Logging;
+using Common.Logging.Configuration;
+using Common.Logging.Simple;
 using NUnit.Framework;
 
 using Npgsql;
@@ -19,35 +22,105 @@ namespace NpgsqlTests
 
         private static readonly TimeSpan TestRunTime = new TimeSpan(0, 0, 10); // 10 seconds
 
-        [Test, Description("A normal insert command with one parameter")]
-        public void ParameterizedInsert()
+        [Test, Description("A minimal, simple, non-query scenario")]
+        public void ExecuteUpdateNonQuery()
         {
-            using (var command = Conn.CreateCommand())
+            using (var metrics = TestMetrics.Start(TestRunTime, true))
             {
-                command.CommandType = CommandType.Text;
-                command.CommandText = "INSERT INTO data (field_text) values (:data)";
-
-                IDbDataParameter dataParameter = command.CreateParameter();
-                dataParameter.Direction = ParameterDirection.Input;
-                dataParameter.DbType = DbType.String;
-                dataParameter.ParameterName = "data";
-
-                command.Parameters.Add(dataParameter);
-
-                using (var metrics = TestMetrics.Start(TestRunTime, true))
+                while (!metrics.TimesUp)
                 {
-                    while (! metrics.TimesUp)
-                    {
-                        dataParameter.Value = "yo";
-                        command.ExecuteScalar();
-                        metrics.IncrementIterations();
-                    }
+                    ExecuteNonQuery("set lock_timeout = 1000");
+                    metrics.IncrementIterations();
                 }
             }
         }
 
-        [Test, Description("A prepared insert command with one parameter")]
-        public void ParameterizedPreparedInsert()
+#if NET45
+        [Test, Description("A minimal, simple, non-query scenario in async")]
+        public async void ExecuteUpdateNonQueryAsync()
+        {
+            using (var metrics = TestMetrics.Start(TestRunTime, true))
+            {
+                while (!metrics.TimesUp)
+                {
+                    await ExecuteNonQueryAsync("set lock_timeout = 1000");
+                    metrics.IncrementIterations();
+                }
+            }
+        }
+#endif
+
+        [Test, Description("A minimal, simple, scalar scenario")]
+        public void ExecuteScalar()
+        {
+            using (var metrics = TestMetrics.Start(TestRunTime, true))
+            {
+                while (!metrics.TimesUp)
+                {
+                    ExecuteScalar("SELECT 1 + 1");
+                    metrics.IncrementIterations();
+                }
+            }
+        }
+
+#if NET45
+        [Test, Description("A minimal, simple, scalar scenario in async")]
+        public async void ExecuteScalarAsync()
+        {
+            using (var metrics = TestMetrics.Start(TestRunTime, true))
+            {
+                while (!metrics.TimesUp)
+                {
+                    await ExecuteScalarAsync("SELECT 1 + 1");
+                    metrics.IncrementIterations();
+                }
+            }
+        }
+#endif
+
+        [Test, Description("A minimal, simple reader scenario")]
+        [TestCase(100)]
+        public void ExecuteReader(int rows)
+        {
+            for (var i = 0; i < rows; i++)
+                ExecuteNonQuery("INSERT INTO DATA (field_int4) VALUES (10)");
+            using (var metrics = TestMetrics.Start(TestRunTime, true))
+            {
+                while (!metrics.TimesUp)
+                {
+                    using (var cmd = new NpgsqlCommand("SELECT field_int4 FROM data", Conn))
+                    using (var reader = cmd.ExecuteReader()) {
+                        while (reader.Read()) {}
+                    }
+                    metrics.IncrementIterations();
+                }
+            }
+        }
+
+#if NET45
+        [Test, Description("A minimal, simple reader scenario in async")]
+        [TestCase(100)]
+        public async void ExecuteReaderAsync(int rows)
+        {
+            for (var i = 0; i < rows; i++)
+                ExecuteNonQuery("INSERT INTO DATA (field_int4) VALUES (10)");
+            using (var metrics = TestMetrics.Start(TestRunTime, true))
+            {
+                while (!metrics.TimesUp)
+                {
+                    using (var cmd = new NpgsqlCommand("SELECT field_int4 FROM data", Conn))
+                    using (var reader = await cmd.ExecuteReaderAsync())
+                    {
+                        while (await reader.ReadAsync()) { }
+                    }
+                    metrics.IncrementIterations();
+                }
+            }
+        }
+#endif
+
+        [Test, Description("A normal insert command with one parameter")]
+        public void ParameterizedInsert()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -74,7 +147,10 @@ namespace NpgsqlTests
             }
         }
 
-        private void ParameterizedSelectDecimalRoundTrip_Internal(bool prepare)
+        #region Parameterized selects on various types
+
+        [Test, Description("A single decimal roundtrip test")]
+        public void ParameterizedSelectDecimalRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -92,10 +168,7 @@ namespace NpgsqlTests
                 {
                     while (! metrics.TimesUp)
                     {
-                        if (prepare)
-                        {
-                            command.Prepare();
-                        }
+                        command.Prepare();
 
                         var data2 = (decimal)command.ExecuteScalar();
                         metrics.IncrementIterations();
@@ -104,19 +177,8 @@ namespace NpgsqlTests
             }
         }
 
-        [Test, Description("A single decimal roundtrip test")]
-        public void ParameterizedSelectDecimalRoundTrip()
-        {
-            ParameterizedSelectDecimalRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A single decimal roundtrip test, prepared")]
-        public void ParameterizedSelectDecimalRoundTripPrepared()
-        {
-            ParameterizedSelectDecimalRoundTrip_Internal(true);
-        }
-
-        private void ParameterizedSelectByteaRoundTrip_Internal(bool prepare)
+        [Test, Description("A large bytea roundtrip test")]
+        public void ParameterizedSelectByteaRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -135,10 +197,7 @@ namespace NpgsqlTests
                 command.Parameters.Add(dataParameter);
                 dataParameter.Value = data;
 
-                if (prepare)
-                {
-                    command.Prepare();
-                }
+                command.Prepare();
 
                 using (var metrics = TestMetrics.Start(TestRunTime, true))
                 {
@@ -151,35 +210,8 @@ namespace NpgsqlTests
             }
         }
 
-        [Test, Description("A large bytea roundtrip test")]
-        public void ParameterizedSelectByteaRoundTrip()
-        {
-            ParameterizedSelectByteaRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A large bytea roundtrip test, prepared")]
-        public void ParameterizedSelectByteaRoundTripPrepared()
-        {
-            ParameterizedSelectByteaRoundTrip_Internal(true);
-        }
-
-        [Test, Description("A large bytea roundtrip test, prepared, binary suppressed")]
-        public void ParameterizedSelectByteaRoundTripPrepared_SuppressBinary()
-        {
-            if (SuppressBinaryBackendEncoding != null)
-            {
-                using (SuppressBackendBinary())
-                {
-                    ParameterizedSelectByteaRoundTrip_Internal(true);
-                }
-            }
-            else
-            {
-                Console.WriteLine("Binary suppression not supported in this version of Npgsql; test not executed");
-            }
-        }
-
-        private void ParameterizedSelectBigIntRoundTrip_Internal(bool prepare)
+        [Test, Description("A bigint roundtrip test")]
+        public void ParameterizedSelectBigIntRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -196,10 +228,7 @@ namespace NpgsqlTests
                     dataParameter.Value = 0xFFFFFFFFFFFFFFF;
                 }
 
-                if (prepare)
-                {
-                    command.Prepare();
-                }
+                command.Prepare();
 
                 using (var metrics = TestMetrics.Start(TestRunTime, true))
                 {
@@ -216,35 +245,8 @@ namespace NpgsqlTests
             }
         }
 
-        [Test, Description("A bigint roundtrip test")]
-        public void ParameterizedSelectBigIntRoundTrip()
-        {
-            ParameterizedSelectBigIntRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A bigint roundtrip test, prepared")]
-        public void ParameterizedSelectBigIntRoundTripPrepared()
-        {
-            ParameterizedSelectBigIntRoundTrip_Internal(true);
-        }
-
-        [Test, Description("A bigint roundtrip test, prepared, binary suppressed")]
-        public void ParameterizedSelectBigIntRoundTripPrepared_SuppressBinary()
-        {
-            if (SuppressBinaryBackendEncoding != null)
-            {
-                using (SuppressBackendBinary())
-                {
-                    ParameterizedSelectBigIntRoundTrip_Internal(true);
-                }
-            }
-            else
-            {
-                Console.WriteLine("Binary suppression not supported in this version of Npgsql; test not executed");
-            }
-        }
-
-        private void ParameterizedSelectBigIntArrayRoundTrip_Internal(bool prepare)
+        [Test, Description("A bigint array roundtrip test")]
+        public void ParameterizedSelectBigIntArrayRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -265,10 +267,7 @@ namespace NpgsqlTests
                 command.Parameters.Add(dataParameter);
                 dataParameter.Value = data;
 
-                if (prepare)
-                {
-                    command.Prepare();
-                }
+                command.Prepare();
 
                 using (var metrics = TestMetrics.Start(TestRunTime, true))
                 {
@@ -281,35 +280,8 @@ namespace NpgsqlTests
             }
         }
 
-        [Test, Description("A bigint array roundtrip test")]
-        public void ParameterizedSelectBigIntArrayRoundTrip()
-        {
-            ParameterizedSelectBigIntArrayRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A bigint array roundtrip test, prepared")]
-        public void ParameterizedSelectBigIntArrayRoundTripPrepared()
-        {
-            ParameterizedSelectBigIntArrayRoundTrip_Internal(true);
-        }
-
-        [Test, Description("A bigint array roundtrip test, prepared, binary suppressed")]
-        public void ParameterizedSelectBigIntArrayRoundTripPrepared_SuppressBinary()
-        {
-            if (SuppressBinaryBackendEncoding != null)
-            {
-                using (SuppressBackendBinary())
-                {
-                    ParameterizedSelectBigIntArrayRoundTrip_Internal(true);
-                }
-            }
-            else
-            {
-                Console.WriteLine("Binary suppression not supported in this version of Npgsql; test not executed");
-            }
-        }
-
-        private void ParameterizedSelectTextArrayRoundTrip_Internal(bool prepare)
+        [Test, Description("A text array roundtrip test")]
+        public void ParameterizedSelectArrayRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -330,90 +302,7 @@ namespace NpgsqlTests
                 command.Parameters.Add(dataParameter);
                 dataParameter.Value = data;
 
-                if (prepare)
-                {
-                    command.Prepare();
-                }
-
-                using (var metrics = TestMetrics.Start(TestRunTime, true))
-                {
-                    while (! metrics.TimesUp)
-                    {
-                        try
-                        {
-                            command.ExecuteScalar();
-                        }
-                        catch (NpgsqlException e)
-                        {
-                            if (e.Message.Length > 500)
-                            {
-                                Console.WriteLine(string.Format("Error: {0}", e.Message.Substring(0, 100)));
-                                throw new Exception(e.Message.Substring(0, 500));
-                            }
-                            else
-                            {
-                                throw;
-                            }
-                        }
-                        metrics.IncrementIterations();
-                    }
-                }
-            }
-        }
-
-        [Test, Description("A text array roundtrip test")]
-        public void ParameterizedSelectTextArrayRoundTrip()
-        {
-            ParameterizedSelectTextArrayRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A text array roundtrip test, prepared")]
-        public void ParameterizedSelectTextArrayRoundTripPrepared()
-        {
-            ParameterizedSelectTextArrayRoundTrip_Internal(true);
-        }
-
-        [Test, Description("A text array roundtrip test, prepared, binary suppressed")]
-        public void ParameterizedSelectTextArrayRoundTripPrepared_SuppressBinary()
-        {
-            if (SuppressBinaryBackendEncoding != null)
-            {
-                using (SuppressBackendBinary())
-                {
-                    ParameterizedSelectTextArrayRoundTrip_Internal(true);
-                }
-            }
-            else
-            {
-                Console.WriteLine("Binary suppression not supported in this version of Npgsql; test not executed");
-            }
-        }
-
-        private void ParameterizedSelectByteaArrayRoundTrip_Internal(bool prepare)
-        {
-            using (var command = Conn.CreateCommand())
-            {
-                command.CommandType = CommandType.Text;
-                command.CommandText = "SELECT :data";
-
-                byte[] bytes = new byte[50000];
-                for (int i = 0  ; i < bytes.Length ; i++)
-                {
-                    bytes[i] = (byte)(i % 255);
-                }
-                byte[][] data = new byte[][] { bytes, bytes };
-
-                NpgsqlParameter dataParameter = command.CreateParameter();
-                dataParameter.Direction = ParameterDirection.Input;
-                dataParameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bytea | NpgsqlTypes.NpgsqlDbType.Array;
-                dataParameter.ParameterName = "data";
-                command.Parameters.Add(dataParameter);
-                dataParameter.Value = data;
-
-                if (prepare)
-                {
-                    command.Prepare();
-                }
+                command.Prepare();
 
                 using (var metrics = TestMetrics.Start(TestRunTime, true))
                 {
@@ -444,32 +333,55 @@ namespace NpgsqlTests
         [Test, Description("A bytea array roundtrip test")]
         public void ParameterizedSelectByteaArrayRoundTrip()
         {
-            ParameterizedSelectByteaArrayRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A bytea array roundtrip test, prepared")]
-        public void ParameterizedSelectByteaArrayRoundTripPrepared()
-        {
-            ParameterizedSelectByteaArrayRoundTrip_Internal(true);
-        }
-
-        [Test, Description("A bytea array roundtrip test, prepared, binary suppressed")]
-        public void ParameterizedSelectByteaArrayRoundTripPrepared_SuppressBinary()
-        {
-            if (SuppressBinaryBackendEncoding != null)
+            using (var command = Conn.CreateCommand())
             {
-                using (SuppressBackendBinary())
+                command.CommandType = CommandType.Text;
+                command.CommandText = "SELECT :data";
+
+                byte[] bytes = new byte[50000];
+                for (int i = 0  ; i < bytes.Length ; i++)
                 {
-                    ParameterizedSelectByteaArrayRoundTrip_Internal(true);
+                    bytes[i] = (byte)(i % 255);
+                }
+                byte[][] data = new byte[][] { bytes, bytes };
+
+                NpgsqlParameter dataParameter = command.CreateParameter();
+                dataParameter.Direction = ParameterDirection.Input;
+                dataParameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bytea | NpgsqlTypes.NpgsqlDbType.Array;
+                dataParameter.ParameterName = "data";
+                command.Parameters.Add(dataParameter);
+                dataParameter.Value = data;
+
+                command.Prepare();
+
+                using (var metrics = TestMetrics.Start(TestRunTime, true))
+                {
+                    while (! metrics.TimesUp)
+                    {
+                        try
+                        {
+                            command.ExecuteScalar();
+                        }
+                        catch (NpgsqlException e)
+                        {
+                            if (e.Message.Length > 500)
+                            {
+                                Console.WriteLine(string.Format("Error: {0}", e.Message.Substring(0, 100)));
+                                throw new Exception(e.Message.Substring(0, 500));
+                            }
+                            else
+                            {
+                                throw;
+                            }
+                        }
+                        metrics.IncrementIterations();
+                    }
                 }
             }
-            else
-            {
-                Console.WriteLine("Binary suppression not supported in this version of Npgsql; test not executed");
-            }
         }
 
-        private void ParameterizedSelectDecimalArrayRoundTrip_Internal(bool prepare)
+        [Test, Description("A decimal array roundtrip test")]
+        public void ParameterizedSelectDecimalArrayRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -490,10 +402,7 @@ namespace NpgsqlTests
                 command.Parameters.Add(dataParameter);
                 dataParameter.Value = data;
 
-                if (prepare)
-                {
-                    command.Prepare();
-                }
+                command.Prepare();
 
                 using (var metrics = TestMetrics.Start(TestRunTime, true))
                 {
@@ -506,19 +415,8 @@ namespace NpgsqlTests
             }
         }
 
-        [Test, Description("A decimal array roundtrip test")]
-        public void ParameterizedSelectDecimalArrayRoundTrip()
-        {
-            ParameterizedSelectDecimalArrayRoundTrip_Internal(false);
-        }
-
-        [Test, Description("A timestamp array roundtrip test, prepared")]
-        public void ParameterizedSelectDecimalArrayRoundTripPrepared()
-        {
-            ParameterizedSelectDecimalArrayRoundTrip_Internal(true);
-        }
-
-        private void ParameterizedSelectMoneyArrayRoundTrip_Internal(bool prepare)
+        [Test, Description("A money array roundtrip test")]
+        public void ParameterizedSelectMoneyArrayRoundTrip()
         {
             using (var command = Conn.CreateCommand())
             {
@@ -539,10 +437,7 @@ namespace NpgsqlTests
                 command.Parameters.Add(dataParameter);
                 dataParameter.Value = data;
 
-                if (prepare)
-                {
-                    command.Prepare();
-                }
+                command.Prepare();
 
                 using (var metrics = TestMetrics.Start(TestRunTime, true))
                 {
@@ -555,41 +450,14 @@ namespace NpgsqlTests
             }
         }
 
-        [Test, Description("A money array roundtrip test")]
-        public void ParameterizedSelectMoneyArrayRoundTrip()
-        {
-            ParameterizedSelectMoneyArrayRoundTrip_Internal(false);
-        }
+        #endregion
 
-        [Test, Description("A money array roundtrip test, prepared")]
-        public void ParameterizedSelectMoneyArrayRoundTripPrepared()
-        {
-            ParameterizedSelectMoneyArrayRoundTrip_Internal(true);
-        }
-
-        [Test, Description("connect and disconnect with pool")]
-        public void ConnectWithPool()
+        [Test, Description("connect and disconnect, with and without pool")]
+        [TestCase(true), TestCase(false)]
+        public void ConnectWithPool(bool withPool)
         {
             NpgsqlConnectionStringBuilder csb = new NpgsqlConnectionStringBuilder(Conn.ConnectionString);
-            csb.Pooling = true;
-            String conStr = csb.ConnectionString;
-            using (var metrics = TestMetrics.Start(TestRunTime, true))
-            {
-                while (!metrics.TimesUp)
-                {
-                    var con = new NpgsqlConnection(conStr);
-                    con.Open();
-                    con.Dispose();
-                    metrics.IncrementIterations();
-                }
-            }
-        }
-
-        [Test, Description("connect and disconnect without pool")]
-        public void ConnectWithoutPool()
-        {
-            NpgsqlConnectionStringBuilder csb = new NpgsqlConnectionStringBuilder(Conn.ConnectionString);
-            csb.Pooling = false;
+            csb.Pooling = withPool;
             String conStr = csb.ConnectionString;
             using (var metrics = TestMetrics.Start(TestRunTime, true))
             {
@@ -633,53 +501,14 @@ namespace NpgsqlTests
         }
 
         [Test]
-        public void ParameterCollectionGetValueFor1ItemDifferentCase()
-        {
-            this.PerformanceWithNParameters(1, true);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor10ItemsDifferentCase()
-        {
-            this.PerformanceWithNParameters(10, true);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor100ItemsDifferentCase()
-        {
-            this.PerformanceWithNParameters(100, true);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor1000ItemsDifferentCase()
-        {
-            this.PerformanceWithNParameters(1000, true);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor1ItemSameCase()
-        {
-            this.PerformanceWithNParameters(1, false);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor10ItemsSameCase()
-        {
-            this.PerformanceWithNParameters(10, false);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor100ItemsSameCase()
-        {
-            this.PerformanceWithNParameters(100, false);
-        }
-
-        [Test]
-        public void ParameterCollectionGetValueFor1000ItemsSameCase()
-        {
-            this.PerformanceWithNParameters(1000, false);
-        }
-
+        [TestCase(1,    true)]
+        [TestCase(10,   true)]
+        [TestCase(100,  true)]
+        [TestCase(1000, true)]
+        [TestCase(1,    false)]
+        [TestCase(10,   false)]
+        [TestCase(100,  false)]
+        [TestCase(1000, false)]
         private void PerformanceWithNParameters(int n, bool differentCase)
         {
             var command = new NpgsqlCommand();
@@ -709,20 +538,10 @@ namespace NpgsqlTests
 
         #region Setup / Teardown / Utils
 
-        private Stopwatch _watch;
-
-        [SetUp]
-        public void Setup()
+        protected override void SetupLogging()
         {
-            _watch = new Stopwatch();
-            _watch.Start();
-        }
-
-        [TearDown]
-        public void Teardown()
-        {
-            _watch.Stop();
-            Console.WriteLine("Total test running time: {0}ms",  _watch.ElapsedMilliseconds);
+            // Disable logging because it impacts performance
+            LogManager.Adapter = new NoOpLoggerFactoryAdapter();
         }
 
         #endregion

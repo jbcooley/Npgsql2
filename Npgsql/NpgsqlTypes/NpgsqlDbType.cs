@@ -37,6 +37,7 @@ namespace NpgsqlTypes
         // Binary or with other values. E.g. Array of Box is NpgsqlDbType.Array | NpgsqlDbType.Box
 
         Array = int.MinValue,
+        Range = 0x40000000,
 
         Bigint = 1,
 
@@ -72,7 +73,24 @@ namespace NpgsqlTypes
         TimeTZ,
         Name,
         Abstime,
-        MacAddr
+        MacAddr,
+        Json,
+        Jsonb,
+        Hstore,
+        SingleChar,
+        Varbit,
+        Unknown,
+
+        Oid,
+        Xid,
+        Cid,
+        Cidr,
+
+        TsVector,
+        TsQuery,
+
+        Enum,
+        Composite,
     }
 }
 

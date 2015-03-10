@@ -23,6 +23,7 @@
 
 using System;
 using System.Data;
+using System.Data.SqlClient;
 using System.Web.UI.WebControls;
 using Npgsql;
 
@@ -39,6 +40,7 @@ namespace NpgsqlTests
         public DataAdapterTests(string backendVersion) : base(backendVersion) { }
 
         [Test]
+        [MonoIgnore("Bug in mono, submitted pull request: https://github.com/mono/mono/pull/1172")]
         public void InsertWithDataSet()
         {
             var ds = new DataSet();
@@ -137,7 +139,7 @@ namespace NpgsqlTests
             da.Update(ds);
 
             //## change id from 1 to 2
-            cmd.CommandText = "update tabled set field_float4 = 0.8 where id = (select max(field_serial) from tabled)";
+            cmd.CommandText = "update tabled set field_float4 = 0.8";
             cmd.ExecuteNonQuery();
 
             //## change value to newvalue
@@ -184,7 +186,6 @@ namespace NpgsqlTests
             Assert.AreEqual("field_serial", field_serial.ColumnName);
             Assert.AreEqual(typeof(int), field_serial.DataType);
             Assert.AreEqual(0, field_serial.Ordinal);
-            // version 2 of the protocol doesn't know how to populate the unique field
             Assert.IsTrue(field_serial.Unique);
 
             Assert.IsTrue(field_int2.AllowDBNull);
@@ -241,6 +242,7 @@ namespace NpgsqlTests
         }
 
         [Test]
+        [MonoIgnore("Bug in mono, submitted pull request: https://github.com/mono/mono/pull/1172")]
         public void UpdateLettingNullFieldValue()
         {
             var command = new NpgsqlCommand(@"INSERT INTO data (field_int2) VALUES (2)", Conn);
@@ -308,7 +310,7 @@ namespace NpgsqlTests
             command.ExecuteNonQuery();
 
             var ds = new DataSet();
-            var da = new NpgsqlDataAdapter("select * from tableb where field_serial = (select max(field_serial) from tableb)", Conn);
+            var da = new NpgsqlDataAdapter("select * from tableb", Conn);
             var cb = new NpgsqlCommandBuilder(da);
             Assert.IsNotNull(cb);
 
@@ -326,7 +328,7 @@ namespace NpgsqlTests
             ds.Merge(ds2);
             ds.AcceptChanges();
 
-            using (var dr2 = new NpgsqlCommand("select * from tableb where field_serial = (select max(field_serial) from tableb)", Conn).ExecuteReader())
+            using (var dr2 = new NpgsqlCommand("select * from tableb", Conn).ExecuteReader())
             {
                 dr2.Read();
                 Assert.AreEqual(4, dr2["field_int2"]);
@@ -417,21 +419,40 @@ namespace NpgsqlTests
             System.Data.Common.DbDataAdapter common = da;
             Assert.IsNotNull(common.SelectCommand);
         }
-    }
-    /*
-    [TestFixture]
-    public class DataAdapterTestsV2 : DataAdapterTests
-    {
-        public DataAdapterTestsV2(int backendProtocolVersion) : base(backendProtocolVersion) {}
 
-        public override void DoInsertWithCommandBuilderCaseSensitive()
+        [Test, Description("Makes sure that the INSERT/UPDATE/DELETE commands are auto-populated on NpgsqlDataAdapter (issue #179)")]
+        public void AutoPopulateAdapterCommands()
         {
-            //Not possible with V2?
+            var da = new NpgsqlDataAdapter("SELECT field_pk,field_int4 FROM data", Conn);
+            var builder = new NpgsqlCommandBuilder(da);
+            var ds = new DataSet();
+            da.Fill(ds);
+
+            var table = ds.Tables[0];
+            var row = table.NewRow();
+            row["field_pk"] = 1;
+            row["field_int4"] = 8;
+            table.Rows.Add(row);
+            da.Update(ds);
+            Assert.That(ExecuteScalar(@"SELECT field_int4 FROM data"), Is.EqualTo(8));
+
+            row["field_int4"] = 9;
+            da.Update(ds);
+            Assert.That(ExecuteScalar(@"SELECT field_int4 FROM data"), Is.EqualTo(9));
+
+            row.Delete();
+            da.Update(ds);
+            Assert.That(ExecuteScalar(@"SELECT COUNT(*) FROM data"), Is.EqualTo(0));
         }
-        public override void DoUpdateWithDataSet()
+
+        [Test]
+        public void CommandBuilderQuoting()
         {
-            //Not possible with V2?
+            var cb = new NpgsqlCommandBuilder();
+            const string orig = "some\"column";
+            var quoted = cb.QuoteIdentifier(orig);
+            Assert.That(quoted, Is.EqualTo("\"some\"\"column\""));
+            Assert.That(cb.UnquoteIdentifier(quoted), Is.EqualTo(orig));
         }
     }
-     */
 }

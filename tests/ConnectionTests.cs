@@ -22,11 +22,16 @@
 // Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 using System;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
 using System.Data;
 using System.Resources;
+using Npgsql.Localization;
 using NUnit.Framework;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using NpgsqlTypes;
 
 namespace NpgsqlTests
@@ -35,6 +40,82 @@ namespace NpgsqlTests
     public class ConnectionTests : TestBase
     {
         public ConnectionTests(string backendVersion) : base(backendVersion) { }
+
+        [Test, Description("Makes sure the connection goes through the proper state lifecycle")]
+        //[Timeout(5000)]
+        public void BasicLifecycle()
+        {
+            using (var conn = new NpgsqlConnection(ConnectionString))
+            {
+                bool eventOpen = false, eventClosed = false;
+                conn.StateChange += (s, e) =>
+                {
+                    if (e.OriginalState == ConnectionState.Closed && e.CurrentState == ConnectionState.Open)
+                        eventOpen = true;
+                    if (e.OriginalState == ConnectionState.Open && e.CurrentState == ConnectionState.Closed)
+                        eventClosed = true;
+                };
+
+                Assert.That(conn.State, Is.EqualTo(ConnectionState.Closed));
+                Assert.That(conn.FullState, Is.EqualTo(ConnectionState.Closed));
+
+                // TODO: Connecting state?
+
+                conn.Open();
+                Assert.That(conn.State, Is.EqualTo(ConnectionState.Open));
+                Assert.That(conn.FullState, Is.EqualTo(ConnectionState.Open));
+                Assert.That(conn.Connector.State, Is.EqualTo(ConnectorState.Ready));
+                Assert.That(eventOpen, Is.True);
+
+                using (var cmd = new NpgsqlCommand("SELECT 1", conn))
+                using (var reader = cmd.ExecuteReader())
+                {
+                    reader.Read();
+                    Assert.That(conn.FullState, Is.EqualTo(ConnectionState.Open | ConnectionState.Fetching));
+                    Assert.That(conn.State, Is.EqualTo(ConnectionState.Open));
+                    Assert.That(conn.Connector.State, Is.EqualTo(ConnectorState.Fetching));
+                }
+
+                Assert.That(conn.FullState, Is.EqualTo(ConnectionState.Open));
+                Assert.That(conn.State, Is.EqualTo(ConnectionState.Open));
+                Assert.That(conn.Connector.State, Is.EqualTo(ConnectorState.Ready));
+
+                using (var cmd = new NpgsqlCommand("SELECT pg_sleep(1)", conn))
+                {
+                    var exitFlag = false;
+                    var pollingTask = Task.Factory.StartNew(() =>
+                    {
+                        while (true)
+                        {
+                            if (exitFlag) {
+                                Assert.Fail("Connection did not reach the Executing state");
+                            }
+                            if (conn.Connector.State == ConnectorState.Executing)
+                            {
+                                Assert.That(conn.FullState & ConnectionState.Executing, Is.Not.EqualTo(0));
+                                Assert.That(conn.State, Is.EqualTo(ConnectionState.Open));
+                                return;
+                            }
+                        }
+                    });
+                    cmd.ExecuteNonQuery();
+                    exitFlag = true;
+                    pollingTask.Wait();
+                }
+
+                conn.Close();
+                Assert.That(conn.State, Is.EqualTo(ConnectionState.Closed));
+                Assert.That(conn.FullState, Is.EqualTo(ConnectionState.Closed));
+                Assert.That(eventClosed, Is.True);
+
+                conn.Open();
+                Assert.That(conn.State, Is.EqualTo(ConnectionState.Open));
+                Assert.That(conn.FullState, Is.EqualTo(ConnectionState.Open));
+                Assert.That(conn.Connector.State, Is.EqualTo(ConnectorState.Ready));
+
+                // TODO: Broken, when implemented
+            }
+        }
 
         [Test]
         public void ChangeDatabase()
@@ -86,36 +167,44 @@ namespace NpgsqlTests
         }
 
         [Test]
+        [ExpectedException(typeof(SocketException))]
         public void ConnectionRefused()
         {
-            try
-            {
-                var conn = new NpgsqlConnection("Server=127.0.0.1;Port=44444;User Id=npgsql_tets;Password=j");
+            using (var conn = new NpgsqlConnection("Server=127.0.0.1;Port=44444;User Id=npgsql_tets;Password=j")) {
                 conn.Open();
             }
-            catch (NpgsqlException e)
+        }
+
+        [Test]
+        [Ignore("Fails in a non-determinstic manner and only on the build server... investigate...")]
+        public void InvalidUserId()
+        {
+            using (var conn = new NpgsqlConnection(ConnectionString + ";userid=npgsql_tes;pooling=false"))
             {
-                var type_NpgsqlState = typeof(NpgsqlConnection).Assembly.GetType("Npgsql.NpgsqlState");
-                var resman = new ResourceManager(type_NpgsqlState);
-                var expected = string.Format(resman.GetString("Exception_FailedConnection"), "127.0.0.1");
-                Assert.AreEqual(expected, e.Message);
+                Assert.That(conn.Open, Throws.Exception
+                    .TypeOf<NpgsqlException>()
+                    .With.Property("Code").EqualTo("28P01")
+                );
             }
         }
 
         [Test]
-        [ExpectedException(typeof(NpgsqlException))]
-        public void ConnectionStringWithEqualSignValue()
+        [ExpectedException(typeof(ArgumentException))]
+        public void InvalidConnectionString()
         {
-            var conn = new NpgsqlConnection("Server=127.0.0.1;Port=44444;User Id=npgsql_tets;Password=j==");
+            var conn = new NpgsqlConnection("Server=127.0.0.1;User Id=npgsql_tests;Pooling:false");
             conn.Open();
         }
 
-        [Test]
-        [ExpectedException(typeof(NpgsqlException))]
-        public void ConnectionStringWithSemicolonSignValue()
+        [Test, Description("Connects with a bad password to ensure the proper error is thrown")]
+        public void AuthenticationFailure()
         {
-            var conn = new NpgsqlConnection("Server=127.0.0.1;Port=44444;User Id=npgsql_tets;Password='j;'");
-            conn.Open();
+            var badConnString = Regex.Replace(ConnectionString, @"Password=\w+", "Password=bad_password");
+            var conn = new NpgsqlConnection(badConnString);
+            Assert.That(() => conn.Open(),
+                Throws.Exception.TypeOf<NpgsqlException>()
+                .With.Property("Code").EqualTo("28P01")
+            );
         }
 
         [Test]
@@ -242,6 +331,8 @@ namespace NpgsqlTests
         [Ignore]
         public void NpgsqlErrorRepro1()
         {
+            throw new NotImplementedException();
+#if WHAT_TO_DO_WITH_THIS
             using (var connection = new NpgsqlConnection(ConnectionString))
             {
                 connection.Open();
@@ -268,6 +359,7 @@ namespace NpgsqlTests
                     }
                 }
             } // *3* sometimes it throws "System.NotSupportedException: This stream does not support seek operations"
+#endif
         }
 
         [Test]
@@ -288,12 +380,6 @@ namespace NpgsqlTests
 
             var connection = new NpgsqlConnection(ConnectionString + ";SearchPath=public");
             connection.Open();
-
-            if (connection.PostgreSqlVersion < new Version(8, 3, 0))
-            {
-                connection.Close();
-                return;
-            }
 
             using (var command = connection.CreateCommand())
             {
@@ -320,6 +406,7 @@ namespace NpgsqlTests
         [Test]
         public void NpgsqlErrorRepro2()
         {
+#if WHAT_TO_DO_WITH_THIS
             var connection = new NpgsqlConnection(ConnectionString);
             connection.Open();
             var transaction = connection.BeginTransaction();
@@ -364,6 +451,7 @@ namespace NpgsqlTests
                     }
                 }
             }
+#endif
         }
 
         [Test]
@@ -371,31 +459,6 @@ namespace NpgsqlTests
         {
             var dt = Conn.GetSchema("ForeignKeys");
             Assert.IsNotNull(dt);
-        }
-
-        [Test]
-        public void ChangeState()
-        {
-            using (var c = new NpgsqlConnection(ConnectionString))
-            {
-                var stateChangeCalledForOpen = false;
-                var stateChangeCalledForClose = false;
-
-                c.StateChange += new StateChangeEventHandler(delegate(object sender, StateChangeEventArgs e)
-                {
-                    if (e.OriginalState == ConnectionState.Closed && e.CurrentState == ConnectionState.Open)
-                        stateChangeCalledForOpen = true;
-
-                    if (e.OriginalState == ConnectionState.Open && e.CurrentState == ConnectionState.Closed)
-                        stateChangeCalledForClose = true;
-                });
-
-                c.Open();
-                c.Close();
-
-                Assert.IsTrue(stateChangeCalledForOpen);
-                Assert.IsTrue(stateChangeCalledForClose);
-            }
         }
 
         [Test]
@@ -423,25 +486,6 @@ namespace NpgsqlTests
         }
 
         [Test]
-        public void CheckExtraFloatingDigitsHigherThanTwo()
-        {
-            
-            using (NpgsqlCommand c = new NpgsqlCommand("show extra_float_digits", Conn))
-            {
-                string extraDigits = (string) c.ExecuteScalar();
-                if (Conn.PostgreSqlVersion >= new Version(9, 0, 0))
-                {
-                    Assert.AreEqual(extraDigits, "3");
-                }
-                else
-                {
-                    Assert.AreEqual(extraDigits, "2");
-                }
-            }
-        }
-
-
-        [Test]
         public void GetConnectionState()
         {
             // Test created to PR #164
@@ -463,6 +507,70 @@ namespace NpgsqlTests
             builder.ApplicationName = "test";
         }
 
+        #region GetSchema
 
+        [Test]
+        public void GetSchema()
+        {
+            using (NpgsqlConnection c = new NpgsqlConnection())
+            {
+                DataTable metaDataCollections = c.GetSchema();
+                Assert.IsTrue(metaDataCollections.Rows.Count > 0, "There should be one or more metadatacollections returned. No connectionstring is required.");
+            }
+        }
+
+        [Test]
+        public void GetSchemaWithDbMetaDataCollectionNames()
+        {
+            DataTable metaDataCollections = Conn.GetSchema(System.Data.Common.DbMetaDataCollectionNames.MetaDataCollections);
+            Assert.IsTrue(metaDataCollections.Rows.Count > 0, "There should be one or more metadatacollections returned.");
+            foreach (DataRow row in metaDataCollections.Rows)
+            {
+                var collectionName = (string)row["CollectionName"];
+                //checking this collection
+                if (collectionName != System.Data.Common.DbMetaDataCollectionNames.MetaDataCollections)
+                {
+                    var collection = Conn.GetSchema(collectionName);
+                    Assert.IsNotNull(collection, "Each of the advertised metadata collections should work");
+                }
+            }
+        }
+
+        [Test]
+        public void GetSchemaWithRestrictions()
+        {
+            DataTable metaDataCollections = Conn.GetSchema(System.Data.Common.DbMetaDataCollectionNames.Restrictions);
+            Assert.IsTrue(metaDataCollections.Rows.Count > 0, "There should be one or more Restrictions returned.");
+        }
+
+        [Test]
+        public void GetSchemaWithReservedWords()
+        {
+            DataTable metaDataCollections = Conn.GetSchema(System.Data.Common.DbMetaDataCollectionNames.ReservedWords);
+            Assert.IsTrue(metaDataCollections.Rows.Count > 0, "There should be one or more ReservedWords returned.");
+        }
+
+        [Test, Description("Tests fetching the schema during a read operation")]
+        public void GetSchemaDuringRead()
+        {
+            ExecuteNonQuery(@"INSERT INTO data (field_text) VALUES ('foo')");
+            var cmd = new NpgsqlCommand(@"SELECT field_text FROM data", Conn);
+            var reader = cmd.ExecuteReader();
+            reader.Read();
+            var metadata = Conn.GetSchema("Tables", new string[] { null, null, "data" });
+            Assert.That(metadata.Rows.Count, Is.EqualTo(1));
+            cmd.Dispose();
+        }
+
+        #endregion
+
+        [Test, Description("Makes sure the preload connstring param triggers the right exception")]
+        [ExpectedException(typeof(NotSupportedException))]
+        public void PreloadReaderNotSupported()
+        {
+            using (var conn = new NpgsqlConnection(ConnectionString + ";PRELOADREADER=true")) {
+                conn.Open();
+            }
+        }
     }
 }

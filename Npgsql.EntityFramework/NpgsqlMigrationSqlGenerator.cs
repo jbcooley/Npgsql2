@@ -32,7 +32,10 @@ using System.Data.Entity.Core.Metadata.Edm;
 using System.Data.Entity.Spatial;
 
 namespace Npgsql
-{
+{        
+    /// <summary>
+    /// Used to generate migration sql
+    /// </summary>
     public class NpgsqlMigrationSqlGenerator : MigrationSqlGenerator
     {
         List<MigrationStatement> migrationStatments;
@@ -40,6 +43,11 @@ namespace Npgsql
         private List<string> addedExtensions;
         private Version serverVersion;
 
+        /// <summary>
+        /// Generates the migration sql.
+        /// </summary>
+        /// <param name="migrationOperations">The operations in the migration</param>
+        /// <param name="providerManifestToken">The provider manifest token used for server versioning.</param>
         public override IEnumerable<MigrationStatement> Generate(
             IEnumerable<MigrationOperation> migrationOperations, string providerManifestToken)
         {
@@ -629,17 +637,20 @@ namespace Npgsql
                         sql.Append("int8");
                     break;
                 case PrimitiveTypeKind.String:
-                    //Seems like bug in EF 6.0.2 to set MaxLength to 1 instead of 0 if not specified
-                    //http://entityframework.codeplex.com/workitem/1784 TODO: Investigate and put back to
-                    //if (column.MaxLength != null && column.MaxLength > 0)
-                    if (column.MaxLength != null && column.MaxLength > 1)
+                    if (column.IsFixedLength.HasValue &&
+                        column.IsFixedLength.Value &&
+                        column.MaxLength.HasValue)
                     {
-                        sql.Append("varchar(");
-                        sql.Append(column.MaxLength);
-                        sql.Append(")");
+                        sql.AppendFormat("char({0})",column.MaxLength.Value);
+                    }
+                    else if (column.MaxLength.HasValue)
+                    {
+                        sql.AppendFormat("varchar({0})", column.MaxLength);
                     }
                     else
+                    {
                         sql.Append("text");
+                    }
                     break;
                 case PrimitiveTypeKind.Time:
                     if (column.Precision != null)

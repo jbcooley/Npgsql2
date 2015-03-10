@@ -23,10 +23,18 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Configuration;
 using System.Diagnostics;
 using System.Reflection;
+using System.Threading.Tasks;
+using Common.Logging;
+using Common.Logging.Configuration;
+using Common.Logging.NLog;
+using NLog.Config;
+using NLog.Targets;
+using System.Text;
 using Npgsql;
 
 using NpgsqlTypes;
@@ -35,15 +43,14 @@ using NUnit.Framework;
 
 namespace NpgsqlTests
 {
+    [TestFixture("9.4")]
     [TestFixture("9.3")]
     [TestFixture("9.2")]
     [TestFixture("9.1")]
     [TestFixture("9.0")]
-    [TestFixture("8.4")]
     public abstract class TestBase
     {
         protected Version BackendVersion { get; private set; }
-        protected ProtocolVersion BackendProtocolVersion = ProtocolVersion.Version3;
 
         /// <summary>
         /// Constructs the parameterized test fixture
@@ -60,7 +67,7 @@ namespace NpgsqlTests
         /// <summary>
         /// A connection to the test database, set up prior to running each test.
         /// </summary>
-        protected NpgsqlConnection Conn { get; private set; }
+        internal NpgsqlConnection Conn { get; set; }
 
         /// <summary>
         /// The connection string that will be used when opening the connection to the tests database.
@@ -107,6 +114,8 @@ namespace NpgsqlTests
         [TestFixtureSetUp]
         public virtual void TestFixtureSetup()
         {
+            SetupLogging();
+
             var connStringEnvVar = "NPGSQL_TEST_DB_" + BackendVersion;
             _connectionString = Environment.GetEnvironmentVariable(connStringEnvVar);
             if (_connectionString == null)
@@ -125,10 +134,6 @@ namespace NpgsqlTests
             else
                 Console.WriteLine("Using connection string provided in env var {0}: {1}", connStringEnvVar, _connectionString);
 
-            if (_connectionString.Contains("protocol"))
-                throw new Exception("Connection string base cannot contain protocol");
-            _connectionString += ";protocol=" + (int)BackendProtocolVersion;
-
             if (!_schemaCreated)
             {
                 try
@@ -145,24 +150,27 @@ namespace NpgsqlTests
                         if (Conn != null && Conn.State == ConnectionState.Open)
                             Conn.Close();
                     }
-                    catch { }
+                    catch
+                    {
+                    }
                     if (e.Code == "3D000")
-                        Assert.Inconclusive("Please create a database npgsql_tests, owned by user npgsql_tests");
+                        TestUtil.Inconclusive("Please create a database npgsql_tests, owned by user npgsql_tests");
                     else if (e.Code == "28P01")
-                        Assert.Inconclusive("Please create a user npgsql_tests as follows: create user npgsql_tests with password 'npgsql_tests'");
+                        TestUtil.Inconclusive(
+                            "Please create a user npgsql_tests as follows: create user npgsql_tests with password 'npgsql_tests'");
                     else
                         throw;
                 }
+                catch
+                {
+                    try {
+                        if (Conn != null && Conn.State == ConnectionState.Open)
+                            Conn.Close();
+                    }
+                    catch {}
+                    throw;
+                }
             }
-
-            try
-            {
-                SuppressBinaryBackendEncoding = InitBinaryBackendSuppression();
-            }
-            catch
-            // Throwing an exception here causes all tests to fail without running.
-            // CommandTests.SuppressBinaryBackendEncodingInitTest() provides error information in event of failure.
-            {}
         }
 
         [SetUp]
@@ -189,9 +197,11 @@ namespace NpgsqlTests
         {
             Console.WriteLine("Creating test database schema");
 
+            var sb = new StringBuilder();
+
             if (Conn.PostgreSqlVersion >= new Version(8, 2, 0))
             {
-                ExecuteNonQuery("DROP TABLE IF EXISTS DATA CASCADE");
+                sb.Append("DROP TABLE IF EXISTS DATA CASCADE;");
             }
             else
             {
@@ -208,9 +218,12 @@ namespace NpgsqlTests
                 }
             }
 
-            ExecuteNonQuery(@"CREATE TABLE data (
-                                field_pk                      SERIAL PRIMARY KEY,
-                                field_serial                  SERIAL,
+            var pkType = Conn.IsRedshift
+                ? "INTEGER IDENTITY (1,1)"
+                : "SERIAL PRIMARY KEY";
+
+            sb.AppendFormat(@"CREATE TABLE data (
+                                field_pk                      {0},
                                 field_text                    TEXT,
                                 field_char5                   CHAR(5),
                                 field_varchar5                VARCHAR(5),
@@ -221,21 +234,55 @@ namespace NpgsqlTests
                                 field_float4                  FLOAT4,
                                 field_float8                  FLOAT8,
                                 field_bool                    BOOL,
-                                field_bit                     BIT,
                                 field_date                    DATE,
-                                field_time                    TIME,
-                                field_timestamp               TIMESTAMP,
-                                field_timestamp_with_timezone TIMESTAMP WITH TIME ZONE,
-                                field_bytea                   BYTEA,
-                                field_inet                    INET,
-                                field_point                   POINT,
-                                field_box                     BOX,
-                                field_lseg                    LSEG,
-                                field_path                    PATH,
-                                field_polygon                 POLYGON,
-                                field_circle                  CIRCLE
-                                ) WITH OIDS");
+                                field_timestamp               TIMESTAMP", pkType);
+
+            if (!Conn.IsRedshift)
+            {
+                sb.Append(",").AppendLine();
+                sb.Append(@"field_serial                  SERIAL,
+                            field_bit                     BIT,
+                            field_time                    TIME,
+                            field_timestamp_with_timezone TIMESTAMP WITH TIME ZONE,
+                            field_bytea                   BYTEA,
+                            field_inet                    INET,
+                            field_point                   POINT,
+                            field_box                     BOX,
+                            field_lseg                    LSEG,
+                            field_path                    PATH,
+                            field_polygon                 POLYGON,
+                            field_circle                  CIRCLE
+                ");
+
+                if (Conn.PostgreSqlVersion >= new Version(9, 2)) {
+                    sb.Append(",").AppendLine();
+                    sb.Append(@"field_json JSON");
+                }
+
+                if (Conn.PostgreSqlVersion >= new Version(9, 4)) {
+                    sb.Append(",").AppendLine();
+                    sb.Append(@"field_jsonb JSONB");
+                }
+            }
+
+            sb.Append(") WITH OIDS;");  // Complete the CREATE TABLE command
+
+            ExecuteNonQuery(sb.ToString());
             _schemaCreated = true;
+        }
+
+        protected void CreateSchema(string schemaName)
+        {
+            if (Conn.PostgreSqlVersion >= new Version(9, 3))
+                ExecuteNonQuery(String.Format("CREATE SCHEMA IF NOT EXISTS {0}", schemaName));
+            else
+            {
+                try { ExecuteNonQuery(String.Format("CREATE SCHEMA {0}", schemaName)); }
+                catch (NpgsqlException e) {
+                    if (e.Code != "42P06")
+                        throw;
+                }
+            }
         }
 
         /// <summary>
@@ -254,107 +301,65 @@ namespace NpgsqlTests
             }
         }
 
+        protected virtual void SetupLogging()
+        {
+            var config = new LoggingConfiguration();
+            var consoleTarget = new ConsoleTarget();
+            consoleTarget.Layout = @"${message}";
+            config.AddTarget("console", consoleTarget);
+            var rule = new LoggingRule("*", NLog.LogLevel.Debug, consoleTarget);
+            config.LoggingRules.Add(rule);
+            NLog.LogManager.Configuration = config;
+
+            LogManager.Adapter = new NLogLoggerFactoryAdapter(new NameValueCollection());
+        }
+
         #endregion
 
         #region Utilities for use by tests
 
-        protected int ExecuteNonQuery(string sql, NpgsqlConnection conn=null)
+        protected int ExecuteNonQuery(string sql, NpgsqlConnection conn = null, NpgsqlTransaction tx = null)
         {
             if (conn == null)
                 conn = Conn;
-            using (var cmd = new NpgsqlCommand(sql, conn))
+            var cmd = tx == null ? new NpgsqlCommand(sql, conn) : new NpgsqlCommand(sql, conn, tx);
+            using (cmd)
                 return cmd.ExecuteNonQuery();
         }
 
-        protected object ExecuteScalar(string sql, NpgsqlConnection conn = null)
+        protected object ExecuteScalar(string sql, NpgsqlConnection conn = null, NpgsqlTransaction tx = null)
         {
             if (conn == null)
                 conn = Conn;
-            using (var cmd = new NpgsqlCommand(sql, conn))
+            var cmd = tx == null ? new NpgsqlCommand(sql, conn) : new NpgsqlCommand(sql, conn, tx);
+            using (cmd)
                 return cmd.ExecuteScalar();
         }
 
-        #endregion
-
-        #region Binary backend suppression
-
-        // Some tests need to suppress binary backend formatting of parameters and result values,
-        // so that both binary and text formatting can be tested.
-        // Setting NpgsqlTypes.NpgsqlTypesHelper.SuppressBinaryBackendEncoding accomplishes this, but it is intentionally internal.
-        // Since it's internal, reflection is required to observe and set it.
-        protected FieldInfo SuppressBinaryBackendEncoding;
-
-        // Use reflection to bind to NpgsqlTypes.NpgsqlTypesHelper.SuppressBinaryBackendEncoding.
-        protected FieldInfo InitBinaryBackendSuppression()
+#if NET45
+        protected async Task<int> ExecuteNonQueryAsync(string sql, NpgsqlConnection conn = null, NpgsqlTransaction tx = null)
         {
-            Assembly npgsql;
-            Type typesHelper;
-            FieldInfo fi;
-
-            npgsql = Assembly.Load("Npgsql");
-
-            // GetType() can return null.  Check for this situation and report it.
-            try
-            {
-                typesHelper = npgsql.GetType("NpgsqlTypes.NpgsqlTypesHelper");
-
-                Assert.IsNotNull(typesHelper, "GetType(\"NpgsqlTypes.NpgsqlTypesHelper\") returned null indicating class not found");
-            }
-            catch (Exception e)
-            {
-                throw new Exception("Failed to bind to class NpgsqlTypes.NpgsqlTypesHelper", e);
-            }
-
-            // GetField() can return null.  Check for this situation and report it.
-            try
-            {
-                fi = typesHelper.GetField("SuppressBinaryBackendEncoding", BindingFlags.Static | BindingFlags.NonPublic);
-
-                Assert.IsNotNull(fi, "GetField(\"SuppressBinaryBackendEncoding\") returned null indicating field not found");
-            }
-            catch (Exception e)
-            {
-                throw new Exception("Failed to bind to field NpgsqlTypes.NpgsqlTypesHelper.SuppressBinaryBackendEncoding", e);
-            }
-
-            Assert.IsTrue(fi.FieldType == typeof(bool), "Field NpgsqlTypes.NpgsqlTypesHelper.SuppressBinaryBackendEncoding is not boolean");
-
-            return fi;
+            if (conn == null)
+                conn = Conn;
+            var cmd = tx == null ? new NpgsqlCommand(sql, conn) : new NpgsqlCommand(sql, conn, tx);
+            using (cmd)
+                return await cmd.ExecuteNonQueryAsync();
         }
 
-        protected class BackendBinarySuppressor : IDisposable
+        protected async Task<object> ExecuteScalarAsync(string sql, NpgsqlConnection conn = null, NpgsqlTransaction tx = null)
         {
-            private FieldInfo suppressionField;
-
-            internal BackendBinarySuppressor(FieldInfo suppressionField)
-            {
-                this.suppressionField = suppressionField;
-                suppressionField.SetValue(null, true);
-            }
-
-            public void Dispose()
-            {
-                suppressionField.SetValue(null, false);
-            }
+            if (conn == null)
+                conn = Conn;
+            var cmd = tx == null ? new NpgsqlCommand(sql, conn) : new NpgsqlCommand(sql, conn, tx);
+            using (cmd)
+                return await cmd.ExecuteScalarAsync();
         }
 
-        /// <summary>
-        /// Return a BackendBinarySuppressor which has suppressed backend binary encoding.
-        /// When it is disposed, suppression will be ended.  Example:
-        /// using (SuppressBackendBinary())
-        /// {
-        ///   // Test text encoding functionality here.
-        /// }
-        /// </summary>
-        protected BackendBinarySuppressor SuppressBackendBinary()
+        protected static bool IsSequential(CommandBehavior behavior)
         {
-            Assert.IsTrue(
-                SuppressBinaryBackendEncoding != null && SuppressBinaryBackendEncoding.FieldType == typeof(bool),
-                "SuppressBinaryBackendEncoding is null or not boolean; binary backend encoding cannot be suppressed. Check test CommandTests.__SuppressBinaryBackendEncodingInitTest() for more information"
-            );
-
-            return new BackendBinarySuppressor(SuppressBinaryBackendEncoding);
+            return (behavior & CommandBehavior.SequentialAccess) != 0;
         }
+#endif
 
         #endregion
     }
